@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Shot Clock</title>
+<style>
+  :root {
+    --bg: #0f2a1f;          /* pool-table felt */
+    --ink: #f1ead8;         /* chalk */
+    --muted: #8fb09e;
+    --panel: #173a2b;
+    --alert: #c8202a;       /* ball red */
+    --alert-ink: #fff;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
+    transition: background .15s;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none; -webkit-user-select: none;
+  }
+  body.over { background: var(--alert); }
+  body.over { --muted: #ffd6d6; --panel: #a21b23; }
+
+  main { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; }
+
+  #time {
+    font-family: "Arial Narrow", "Helvetica Neue", Impact, sans-serif;
+    font-weight: 700;
+    font-size: min(38vw, 52vh);
+    line-height: 1;
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+  }
+  #time small { font-size: .35em; letter-spacing: 0; opacity: .7; }
+
+  #reset {
+    width: min(86vw, 420px); padding: 22px 0;
+    font: inherit; font-size: 1.6rem; font-weight: 700;
+    color: var(--bg); background: var(--ink);
+    border: 0; border-radius: 999px; cursor: pointer;
+  }
+  body.over #reset { color: var(--alert); }
+  #reset:active, #pause:active { transform: scale(.97); }
+  #pause {
+    width: min(86vw, 420px); padding: 16px 0;
+    font: inherit; font-size: 1.2rem; font-weight: 700;
+    color: var(--ink); background: transparent;
+    border: 2px solid var(--ink); border-radius: 999px; cursor: pointer;
+  }
+  body.paused #time { opacity: .55; }
+  body.paused #pause { background: var(--ink); color: var(--bg); }
+  body.over.paused #pause { color: var(--alert); }
+  #reset:focus-visible, #pause:focus-visible, button:focus-visible, input:focus-visible { outline: 3px solid #ffd54a; outline-offset: 3px; }
+
+  #status { color: var(--muted); font-size: .95rem; min-height: 1.4em; text-align: center; max-width: 34ch; }
+
+  details { margin: 0 auto 18px; width: min(92vw, 460px); background: var(--panel); border-radius: 14px; padding: 12px 16px; }
+  summary { cursor: pointer; font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+  .row label { flex: 1 1 100%; color: var(--muted); font-size: .9rem; }
+  input[type=number] { width: 90px; padding: 8px; font: inherit; border-radius: 8px; border: 0; }
+  .row button, .file {
+    font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--muted);
+    background: transparent; color: var(--ink); cursor: pointer;
+  }
+  .file input { display: none; }
+
+  #gate {
+    position: fixed; inset: 0; z-index: 5; background: var(--bg);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 24px; text-align: center;
+  }
+  #gate h1 { margin: 0; font-size: 2rem; }
+  #gate p { margin: 0; color: var(--muted); max-width: 32ch; line-height: 1.5; }
+  #gate button {
+    font: inherit; font-size: 1.4rem; font-weight: 700; padding: 18px 44px;
+    border: 0; border-radius: 999px; background: var(--ink); color: var(--bg); cursor: pointer;
+  }
+  #gate.hidden { display: none; }
+
+  @media (prefers-reduced-motion: reduce) { body { transition: none; } }
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <h1>Shot clock</h1>
+  <p>Connect your AirPods first. Then tap start. Your earbud button will reset the clock.</p>
+  <button id="start">Start</button>
+</div>
+
+<main>
+  <div id="time" aria-live="off">0.0</div>
+  <button id="reset">Reset</button>
+  <button id="pause">Pause</button>
+  <div id="status"></div>
+</main>
+
+<details>
+  <summary>Settings</summary>
+  <div class="row">
+    <label for="limit">Alert at (seconds)</label>
+    <input id="limit" type="number" min="1" max="600" value="10">
+  </div>
+  <div class="row">
+    <label>Alert sound</label>
+    <label class="file">Choose sound file<input id="sndfile" type="file" accept="audio/*"></label>
+    <button id="test">Test</button>
+    <button id="defsnd">Use default</button>
+  </div>
+</details>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const timeEl = $('time'), statusEl = $('status');
+
+  // ---------- Settings ----------
+  let limit = 10;
+  try { limit = parseFloat(localStorage.getItem('limit')) || 10; } catch (e) {}
+  $('limit').value = limit;
+  $('limit').addEventListener('change', e => {
+    limit = Math.max(1, parseFloat(e.target.value) || 10);
+    try { localStorage.setItem('limit', limit); } catch (e) {}
+  });
+
+  // ---------- Timer ----------
+  let t0 = performance.now(), pausedAt = null, alerted = false, running = false;
+
+  function reset() {
+    t0 = performance.now();
+    pausedAt = null;
+    alerted = false;
+    document.body.classList.remove('over', 'paused');
+    $('pause').textContent = 'Pause';
+    stopAlert();
+    render(0);
+  }
+
+  function togglePause() {
+    const now = performance.now();
+    if (pausedAt === null) {
+      pausedAt = now;
+      document.body.classList.add('paused');
+      $('pause').textContent = 'Resume';
+      stopAlert();
+    } else {
+      t0 += now - pausedAt;   // exclude the paused time
+      pausedAt = null;
+      document.body.classList.remove('paused');
+      $('pause').textContent = 'Pause';
+    }
+  }
+
+  function render(ms) {
+    const s = ms / 1000;
+    timeEl.textContent = s.toFixed(1);
+  }
+
+  function tick() {
+    if (running && pausedAt === null) {
+      const ms = performance.now() - t0;
+      render(ms);
+      if (!alerted && ms / 1000 >= limit) {
+        alerted = true;
+        document.body.classList.add('over');
+        playAlert();
+        if (navigator.vibrate) navigator.vibrate([300, 100, 300]);
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // ---------- Alert sound (custom file stored in IndexedDB) ----------
+  let customUrl = null, alertAudio = null, actx = null;
+
+  const db = {
+    open() {
+      return new Promise((res, rej) => {
+        const r = indexedDB.open('shotclock', 1);
+        r.onupgradeneeded = () => r.result.createObjectStore('kv');
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      });
+    },
+    async get(k) {
+      const d = await this.open();
+      return new Promise((res, rej) => {
+        const q = d.transaction('kv').objectStore('kv').get(k);
+        q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+      });
+    },
+    async set(k, v) {
+      const d = await this.open();
+      return new Promise((res, rej) => {
+        const tx = d.transaction('kv', 'readwrite');
+        v === null ? tx.objectStore('kv').delete(k) : tx.objectStore('kv').put(v, k);
+        tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+      });
+    }
+  };
+
+  function setCustom(blob) {
+    if (customUrl) URL.revokeObjectURL(customUrl);
+    customUrl = blob ? URL.createObjectURL(blob) : null;
+    alertAudio = customUrl ? new Audio(customUrl) : null;
+  }
+
+  async function loadSaved() {
+    try { const b = await db.get('sound'); if (b) setCustom(b); } catch (e) {}
+  }
+
+  function beep() {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === 'suspended') actx.resume();
+    [0, 0.28, 0.56].forEach(d => {
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = 'square'; o.frequency.value = 880;
+      g.gain.setValueAtTime(0.0001, actx.currentTime + d);
+      g.gain.exponentialRampToValueAtTime(0.4, actx.currentTime + d + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + d + 0.22);
+      o.connect(g).connect(actx.destination);
+      o.start(actx.currentTime + d); o.stop(actx.currentTime + d + 0.25);
+    });
+  }
+
+  function playAlert() {
+    if (alertAudio) { alertAudio.currentTime = 0; alertAudio.play().catch(beep); }
+    else beep();
+  }
+  function stopAlert() { if (alertAudio) { alertAudio.pause(); alertAudio.currentTime = 0; } }
+
+  $('sndfile').addEventListener('change', async e => {
+    const f = e.target.files[0]; if (!f) return;
+    setCustom(f);
+    try { await db.set('sound', f); setStatus('Custom sound saved.'); } catch (err) { setStatus('Sound loaded for this session only.'); }
+  });
+  $('defsnd').addEventListener('click', async () => {
+    setCustom(null);
+    try { await db.set('sound', null); } catch (e) {}
+    setStatus('Using the default beep.');
+  });
+  $('test').addEventListener('click', playAlert);
+
+  function setStatus(t) { statusEl.textContent = t; }
+
+  // ---------- Earbud button capture ----------
+  // Browsers only route headphone media keys to a page that is actively
+  // playing audio. We loop a near-silent track and handle the media actions.
+  const keep = new Audio();
+  keep.loop = true;
+
+  function makeSilentWav() {
+    const rate = 8000, secs = 4, n = rate * secs;
+    const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    const w = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+    w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
+    // +/-1 LSB noise: inaudible, but not digital silence (some browsers ignore pure silence)
+    for (let i = 0; i < n; i++) v.setInt16(44 + i * 2, Math.random() < .5 ? 1 : -1, true);
+    return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  }
+
+  function keepAlive() {
+    keep.play().catch(() => {});
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+  }
+
+  function onRemote() { reset(); keepAlive(); }
+
+  function setupMediaSession() {
+    if (!('mediaSession' in navigator)) { setStatus('Earbud button not supported in this browser. Use the on-screen button.'); return; }
+    navigator.mediaSession.metadata = new MediaMetadata({ title: 'Shot clock', artist: 'Press to reset' });
+    ['play', 'pause', 'stop', 'nexttrack', 'previoustrack', 'seekforward', 'seekbackward'].forEach(a => {
+      try { navigator.mediaSession.setActionHandler(a, onRemote); } catch (e) {}
+    });
+    // If the system pauses our keep-alive audio, resume it right away.
+    keep.addEventListener('pause', () => setTimeout(keepAlive, 50));
+    keepAlive();
+  }
+
+  // ---------- Screen stays awake ----------
+  let lock = null;
+  async function wake() { try { lock = await navigator.wakeLock.request('screen'); } catch (e) {} }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') { wake(); if (running) keepAlive(); }
+  });
+
+  // ---------- Wire up ----------
+  $('reset').addEventListener('click', reset);
+  $('pause').addEventListener('click', togglePause);
+  document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.code === 'Space') { e.preventDefault(); reset(); }
+    if (e.code === 'KeyP') { e.preventDefault(); togglePause(); }
+  });
+
+  $('start').addEventListener('click', () => {
+    keep.src = makeSilentWav();
+    setupMediaSession();
+    wake();
+    // unlock alert audio for later autoplay
+    if (alertAudio) { alertAudio.muted = true; alertAudio.play().then(() => { alertAudio.pause(); alertAudio.muted = false; alertAudio.currentTime = 0; }).catch(() => { alertAudio.muted = false; }); }
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    actx.resume();
+    $('gate').classList.add('hidden');
+    running = true;
+    reset();
+    setStatus('Earbud button resets the clock.');
+  });
+
+  loadSaved();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
